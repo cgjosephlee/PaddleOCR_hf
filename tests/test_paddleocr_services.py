@@ -10,11 +10,13 @@ from typing import Any
 import httpx
 import numpy as np
 import pypdfium2 as pdfium  # pyright: ignore[reportMissingTypeStubs]
+import pypdfium2.raw as pdfium_c  # pyright: ignore[reportMissingTypeStubs]
 import pytest
 import torch
 from PIL import Image
 
 from paddleocr import (
+    LayoutBlock,
     OCRResult,
     PaddleOCR,
     PaddleOCRVL,
@@ -48,7 +50,7 @@ from paddleocr.registry import (
     DEFAULT_VLM_MODEL,
     resolve_model_id,
 )
-from paddleocr.results import assemble_table_html, html_table_to_markdown
+from paddleocr.results import _resolve_output_file, assemble_table_html, html_table_to_markdown
 
 
 class _FakeClassifierRunner:
@@ -511,3 +513,135 @@ def test_table_html_and_markdown_conversion() -> None:
     assert html == '<table><tr><td colspan="2">Merged Header</td></tr></table>'
     md = html_table_to_markdown(html)
     assert "Merged Header" in md
+
+
+def test_directory_loading_and_pdf_password(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_dir = tmp_path / "batch_inputs"
+    input_dir.mkdir()
+    Image.new("RGB", (50, 30), color="white").save(input_dir / "b_second.png")
+    Image.new("RGB", (60, 40), color="black").save(input_dir / "a_first.jpg")
+    (input_dir / "notes.txt").write_text("ignored", encoding="utf-8")
+
+    # 1-page PDF in the same directory
+    pdf_path = input_dir / "c_third.pdf"
+    pdf_doc: Any = pdfium.PdfDocument.new()
+    page = pdf_doc.new_page(100, 120)
+    page.close()
+    with pdf_path.open("wb") as f:
+        pdf_doc.save(f)
+    pdf_doc.close()
+
+    loaded = load_inputs(input_dir, pdf_dpi=72)
+    assert len(loaded) == 3
+    assert loaded[0].source_path == str(input_dir / "a_first.jpg")
+    assert loaded[1].source_path == str(input_dir / "b_second.png")
+    assert loaded[2].source_path == str(pdf_path)
+    assert loaded[2].page_index == 0
+
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    with pytest.raises(FileNotFoundError, match="No supported image or PDF files"):
+        load_inputs(empty_dir)
+
+    # Test password forwarding and FPDF_ERR_PASSWORD translation
+    recorded_passwords: list[str | None] = []
+    real_pdf_doc_cls = pdfium.PdfDocument
+
+    class _FakeBitmap:
+        def to_pil(self) -> Image.Image:
+            return Image.new("RGB", (40, 40), color="white")
+
+    class _FakePage:
+        def render(self, scale: float = 1.0) -> _FakeBitmap:
+            return _FakeBitmap()
+
+        def close(self) -> None:
+            return None
+
+    class _PasswordCheckingPdfDoc:
+        def __init__(self, data: bytes, password: str | None = None) -> None:
+            recorded_passwords.append(password)
+            if password != "secret-pw":
+                raise pdfium.PdfiumError(
+                    "Incorrect password.",
+                    err_code=pdfium_c.FPDF_ERR_PASSWORD,
+                )
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, idx: int) -> _FakePage:
+            return _FakePage()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(pdfium, "PdfDocument", _PasswordCheckingPdfDoc)
+
+    with pytest.raises(ValueError, match="password-protected"):
+        load_inputs(pdf_path)
+
+    with pytest.raises(ValueError, match="Invalid PDF password"):
+        load_inputs(pdf_path, pdf_password="wrong")
+
+    ocr = PaddleOCR(device="cpu", pdf_password="secret-pw")
+    ocr._det_runner = _FakeTextDetRunner([])  # type: ignore[assignment]
+    res = ocr.predict(pdf_path)
+    assert len(res) == 1
+    assert recorded_passwords[-1] == "secret-pw"
+
+    # Override constructor password at predict() time
+    with pytest.raises(ValueError, match="Invalid PDF password"):
+        ocr.predict(pdf_path, pdf_password="override-wrong")
+
+    monkeypatch.setattr(pdfium, "PdfDocument", real_pdf_doc_cls)
+
+
+def test_save_all_and_url_stem_resolution(tmp_path: Path) -> None:
+    url_file = _resolve_output_file(
+        tmp_path,
+        input_path="https://example.com/path/demo_doc.png?token=abc123&size=full",
+        page_index=0,
+        default_prefix="ocr_result",
+        suffix=".json",
+    )
+    assert url_file.name == "demo_doc_page0.json"
+
+    img = Image.new("RGB", (100, 80), color="white")
+    ocr_res = OCRResult(
+        boxes=[
+            TextBox(
+                box=(5.0, 5.0, 50.0, 20.0),
+                polygon=[(5.0, 5.0), (50.0, 5.0), (50.0, 20.0), (5.0, 20.0)],
+                text="Sample",
+                score=0.99,
+            )
+        ],
+        input_path="sample.png",
+        image=img,
+    )
+    ocr_saved = ocr_res.save_all(tmp_path / "ocr_out")
+    assert set(ocr_saved.keys()) == {"json", "markdown", "img"}
+    assert all(p.exists() for p in ocr_saved.values())
+
+    vl_res = VLResult(markdown_text="# Heading", input_path="vl.png", image=img)
+    vl_saved = vl_res.save_all(tmp_path / "vl_out")
+    assert all(p.exists() for p in vl_saved.values())
+
+    struct_res = StructureResult(
+        blocks=[
+            LayoutBlock(
+                label="text",
+                box=(0.0, 0.0, 50.0, 20.0),
+                score=0.99,
+                content="Body",
+            )
+        ],
+        input_path="st.png",
+        image=img,
+    )
+    struct_saved = struct_res.save_all(tmp_path / "st_out")
+    assert all(p.exists() for p in struct_saved.values())
