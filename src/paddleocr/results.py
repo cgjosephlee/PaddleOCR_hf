@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import html as html_lib
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -504,6 +506,72 @@ def html_table_to_markdown(html: str) -> str:
     separator = "| " + " | ".join(["---"] * num_cols) + " |"
     body_lines = ["| " + " | ".join(row) + " |" for row in normalized_rows[1:]]
     return "\n".join([header, separator, *body_lines])
+
+
+_OTSL_CELL_PATTERN = re.compile(r"<(fcel|ecel|lcel|ucel|xcel)>")
+
+
+def otsl_to_html(otsl_text: str) -> str:
+    """Convert an OTSL table sequence (e.g. from ``PaddleOCR-VL-1.6``) into HTML ``<table>``."""
+    raw_rows = [row for row in otsl_text.split("<nl>") if row.strip()]
+    grid: list[list[tuple[str, str]]] = []
+    for row_str in raw_rows:
+        matches = list(_OTSL_CELL_PATTERN.finditer(row_str))
+        if not matches:
+            continue
+        cells: list[tuple[str, str]] = []
+        for i, match in enumerate(matches):
+            token = f"<{match.group(1)}>"
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(row_str)
+            raw_cell = row_str[match.end() : end]
+            cleaned = html_lib.escape(" ".join(raw_cell.split()))
+            cells.append((token, cleaned))
+        grid.append(cells)
+
+    if not grid:
+        return otsl_text
+
+    num_cols = max(len(row) for row in grid)
+    if num_cols == 0:
+        return otsl_text
+
+    num_rows = len(grid)
+    for row in grid:
+        while len(row) < num_cols:
+            row.append(("<ecel>", ""))
+
+    html_rows: list[str] = []
+    for r in range(num_rows):
+        row_html = ["<tr>"]
+        for c in range(num_cols):
+            token, text = grid[r][c]
+            if token not in {"<fcel>", "<ecel>"}:
+                continue
+
+            colspan = 1
+            while c + colspan < num_cols and grid[r][c + colspan][0] == "<lcel>":
+                colspan += 1
+
+            rowspan = 1
+            nr = r + 1
+            while nr < num_rows and grid[nr][c][0] == "<ucel>":
+                if colspan > 1 and any(
+                    grid[nr][cc][0] != "<xcel>" for cc in range(c + 1, c + colspan)
+                ):
+                    break
+                rowspan += 1
+                nr += 1
+
+            attrs = ""
+            if colspan > 1:
+                attrs += f' colspan="{colspan}"'
+            if rowspan > 1:
+                attrs += f' rowspan="{rowspan}"'
+            row_html.append(f"<td{attrs}>{text}</td>")
+        row_html.append("</tr>")
+        html_rows.append("".join(row_html))
+
+    return f"<table>{''.join(html_rows)}</table>"
 
 
 def assemble_table_html(

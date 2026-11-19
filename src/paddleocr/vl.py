@@ -25,7 +25,13 @@ from .registry import (
     VLM_PIPELINE_DEFAULTS,
     resolve_model_id,
 )
-from .results import LayoutBlock, VLResult, format_blocks_to_markdown, html_table_to_markdown
+from .results import (
+    LayoutBlock,
+    VLResult,
+    format_blocks_to_markdown,
+    html_table_to_markdown,
+    otsl_to_html,
+)
 
 EXTERNAL_VLM_BACKENDS = frozenset(
     {
@@ -89,7 +95,7 @@ class PaddleOCRVL:
         device: DeviceLike = None,
         dtype: DTypeLike = None,
         attn_implementation: str | None = None,
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
     ) -> None:
         self.pipeline_version = pipeline_version
         self.device = resolve_device(device)
@@ -293,9 +299,15 @@ class PaddleOCRVL:
                 vlm_outputs = vlm.generate_batch(vlm_requests, max_new_tokens=tokens_limit)
                 for block_idx, recognized in zip(pending_indices, vlm_outputs, strict=True):
                     blk = blocks[block_idx]
-                    if blk.label.lower() == "table" and "<table" in recognized.lower():
-                        blk.html = recognized
-                        blk.content = html_table_to_markdown(recognized)
+                    if blk.label.lower() == "table":
+                        if "<table" in recognized.lower():
+                            blk.html = recognized
+                            blk.content = html_table_to_markdown(recognized)
+                        elif any(tok in recognized for tok in ("<fcel>", "<ecel>", "<nl>")):
+                            blk.html = otsl_to_html(recognized)
+                            blk.content = html_table_to_markdown(blk.html)
+                        else:
+                            blk.content = recognized
                     else:
                         blk.content = recognized
 

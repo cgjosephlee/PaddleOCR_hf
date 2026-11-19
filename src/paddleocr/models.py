@@ -90,7 +90,10 @@ class ImageClassifierRunner:
         inputs = self.processor(images=list(images), return_tensors="pt")
         moved = _move_inputs_to_device(inputs, self.device, self.dtype)
         outputs = self.model(**moved)
-        logits = cast(torch.Tensor, outputs.logits)
+        raw_logits = getattr(outputs, "logits", None)
+        if raw_logits is None:
+            raw_logits = outputs.last_hidden_state
+        logits = cast(torch.Tensor, raw_logits)
         probs = torch.softmax(logits.float(), dim=-1)
         scores, pred_ids = probs.max(dim=-1)
         id2label: dict[Any, str] = getattr(self.model.config, "id2label", {})
@@ -143,7 +146,7 @@ class DocumentUnwarpingRunner:
         outputs: Any = self.model(pixel_values=pixel_values)
         rectified_list: list[dict[str, torch.Tensor]] = (
             self.processor.post_process_document_rectification(
-                outputs.last_hidden_state,
+                outputs.last_hidden_state.float(),
                 inputs["original_images"],
             )
         )
@@ -456,14 +459,23 @@ class FormulaRecognitionRunner:
         )
 
     @torch.inference_mode()
-    def predict(self, image: Image.Image) -> str:
+    def predict(self, image: Image.Image, *, max_new_tokens: int = 512) -> str:
         inputs: Any = self.processor(images=image, return_tensors="pt")
         moved = _move_inputs_to_device(inputs, self.device, self.dtype)
-        outputs: Any = self.model(**moved)
+        generated_ids: Any = self.model.generate(
+            **moved,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            use_cache=True,
+        )
         if hasattr(self.processor, "post_process"):
-            decoded: list[str] = self.processor.post_process(outputs)
+            decoded: list[str] = self.processor.post_process(generated_ids)
             return str(decoded[0]).strip() if decoded else ""
-        return ""
+        decoded_raw: list[str] = self.processor.batch_decode(
+            generated_ids,
+            skip_special_tokens=True,
+        )
+        return str(decoded_raw[0]).strip() if decoded_raw else ""
 
 
 class ChartParsingRunner:
@@ -512,7 +524,12 @@ class ChartParsingRunner:
         moved = _move_inputs_to_device(inputs, self.device, self.dtype)
         generated_ids = cast(
             torch.Tensor,
-            self.model.generate(**moved, do_sample=False, max_new_tokens=max_new_tokens),
+            self.model.generate(
+                **moved,
+                do_sample=False,
+                max_new_tokens=max_new_tokens,
+                use_cache=True,
+            ),
         )
         input_ids = cast(torch.Tensor, moved["input_ids"])
         trimmed = [
@@ -550,7 +567,7 @@ class LocalVLMRunner:
         *,
         device: torch.device,
         dtype: torch.dtype,
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         attn_implementation: str | None = None,
     ) -> None:
         self.model_id = model_id
@@ -602,7 +619,12 @@ class LocalVLMRunner:
         moved = _move_inputs_to_device(inputs, self.device, self.dtype)
         generated_ids = cast(
             torch.Tensor,
-            self.model.generate(**moved, max_new_tokens=max_new_tokens, do_sample=False),
+            self.model.generate(
+                **moved,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                use_cache=True,
+            ),
         )
         input_ids = cast(torch.Tensor, moved["input_ids"])
         trimmed = [
