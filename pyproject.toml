@@ -22,6 +22,9 @@ dependencies = [
     "transformers>=5.4.0",
 ]
 
+[project.scripts]
+paddleocr = "paddleocr.__main__:console_entry"
+
 [dependency-groups]
 dev = [
     "pyright>=1.1.380",
