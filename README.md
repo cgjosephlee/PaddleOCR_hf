@@ -98,6 +98,34 @@ for res in results:
 
 ---
 
+## CLI Usage
+
+`paddleocr-hf` provides a lean subset of the official PaddleOCR v3 CLI (`ocr`, `doc_parser`, `pp_structurev3`) with zero extra CLI dependencies:
+
+```bash
+# Version and help
+paddleocr --version
+paddleocr --help
+paddleocr ocr --help
+paddleocr doc_parser --help
+paddleocr pp_structurev3 --help
+
+# 1. General OCR (PP-OCRv6 on Apple Silicon MPS)
+paddleocr ocr -i sample.jpg --device mps --save_path ./output
+
+# 2. PaddleOCR-VL (Local transformers vs External API Server)
+paddleocr doc_parser -i document.png --engine transformers --device mps --save_path ./output
+paddleocr doc_parser -i document.pdf --vl_rec_backend vllm-server --vl_rec_server_url http://127.0.0.1:8000/v1 --save_path ./output
+
+# 3. PPStructureV3 on a password-protected PDF
+paddleocr pp_structurev3 -i encrypted.pdf --pdf_password secret --device mps --save_path ./output
+
+# Pipe Markdown cleanly to stdout and save only JSON + Markdown files
+paddleocr ocr -i sample.jpg --output_format markdown --save_path ./output --save_formats json markdown > result.md
+```
+
+---
+
 ## Benchmark: Apple Silicon MPS vs. CPU
 
 Benchmark evaluated on [`sample.jpg`](sample.jpg) (dense Traditional Chinese + English tax withholding statement containing **84 detected text boxes**) using **PP-OCRv6** (`PP-OCRv6_medium_det_safetensors` + `PP-OCRv6_small_rec_safetensors`, `batch_size=16`, 3 timed runs after warmup with `torch.mps.synchronize()`):
