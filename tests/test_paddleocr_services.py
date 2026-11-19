@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -41,6 +42,9 @@ from paddleocr.io import (
 from paddleocr.models import (
     DetectedLayoutItem,
     ExternalVLMClient,
+    FormulaRecognitionRunner,
+    ImageClassifierRunner,
+    LocalVLMRunner,
     parse_orientation_angle,
 )
 from paddleocr.registry import (
@@ -50,7 +54,12 @@ from paddleocr.registry import (
     DEFAULT_VLM_MODEL,
     resolve_model_id,
 )
-from paddleocr.results import _resolve_output_file, assemble_table_html, html_table_to_markdown
+from paddleocr.results import (
+    _resolve_output_file,
+    assemble_table_html,
+    html_table_to_markdown,
+    otsl_to_html,
+)
 
 
 class _FakeClassifierRunner:
@@ -645,3 +654,143 @@ def test_save_all_and_url_stem_resolution(tmp_path: Path) -> None:
     )
     struct_saved = struct_res.save_all(tmp_path / "st_out")
     assert all(p.exists() for p in struct_saved.values())
+
+
+def test_classifier_and_seq2seq_runner_transformers_compat() -> None:
+    img = Image.new("RGB", (64, 48), color="white")
+
+    # 1. ImageClassifierRunner supports both `last_hidden_state` (PPLCNet) and `logits`
+    def _cls_proc(images: Sequence[Image.Image], return_tensors: str) -> dict[str, torch.Tensor]:
+        assert return_tensors == "pt"
+        return {"pixel_values": torch.zeros((len(images), 3, 224, 224))}
+
+    for attr_name in ("last_hidden_state", "logits"):
+        runner = object.__new__(ImageClassifierRunner)
+        runner.model_id = "PaddlePaddle/PP-LCNet_x1_0_table_cls_safetensors"
+        runner.device = torch.device("cpu")
+        runner.dtype = torch.float32
+        runner.processor = _cls_proc
+
+        def _cls_forward(
+            *,
+            _attr: str = attr_name,
+            **kwargs: Any,
+        ) -> Any:
+            tensor = torch.tensor([[0.1, 2.5]])
+            return SimpleNamespace(
+                config=SimpleNamespace(id2label={0: "wired_table", 1: "wireless_table"}),
+                **{_attr: tensor},
+            )
+
+        cls_model: Any = _cls_forward
+        cls_model.config = SimpleNamespace(id2label={0: "wired_table", 1: "wireless_table"})
+        runner.model = cls_model
+
+        preds = runner.predict_batch([img])
+        assert preds[0][0] == "wireless_table"
+        assert preds[0][1] > 0.8
+
+    # 2. FormulaRecognitionRunner uses model.generate(..., use_cache=True)
+    formula_runner = object.__new__(FormulaRecognitionRunner)
+    formula_runner.model_id = "PaddlePaddle/PP-FormulaNet_plus-L_safetensors"
+    formula_runner.device = torch.device("cpu")
+    formula_runner.dtype = torch.float32
+    formula_generate_kwargs: dict[str, Any] = {}
+
+    class _FakeFormulaProcessor:
+        def __call__(self, images: Any, return_tensors: str) -> dict[str, Any]:
+            return {"pixel_values": torch.zeros((1, 3, 384, 384))}
+
+        def post_process(self, generated_outputs: torch.Tensor) -> list[str]:
+            assert [int(tok.item()) for tok in generated_outputs[0]] == [10, 20, 30]
+            return ["E = mc^2"]
+
+    class _FakeFormulaModel:
+        def generate(self, **kwargs: Any) -> torch.Tensor:
+            formula_generate_kwargs.update(kwargs)
+            return torch.tensor([[10, 20, 30]])
+
+    formula_runner.processor = _FakeFormulaProcessor()
+    formula_runner.model = _FakeFormulaModel()
+    assert formula_runner.predict(img) == "E = mc^2"
+    assert formula_generate_kwargs["use_cache"] is True
+    assert formula_generate_kwargs["do_sample"] is False
+
+    # 3. LocalVLMRunner passes use_cache=True and PaddleOCRVL defaults to trust_remote_code=False
+    assert PaddleOCRVL(device="cpu").trust_remote_code is False
+    vlm_runner = object.__new__(LocalVLMRunner)
+    vlm_runner.model_id = DEFAULT_VLM_MODEL
+    vlm_runner.device = torch.device("cpu")
+    vlm_runner.dtype = torch.float32
+    vlm_generate_kwargs: dict[str, Any] = {}
+
+    class _FakeVLMProcessor:
+        def apply_chat_template(self, messages: Any, **kwargs: Any) -> dict[str, Any]:
+            return {"input_ids": torch.tensor([[1, 2, 3]])}
+
+        def batch_decode(self, trimmed: Any, **kwargs: Any) -> list[str]:
+            assert [t.tolist() for t in trimmed] == [[4, 5]]
+            return ["Decoded VLM Text"]
+
+    class _FakeVLMModel:
+        def generate(self, **kwargs: Any) -> torch.Tensor:
+            vlm_generate_kwargs.update(kwargs)
+            return torch.tensor([[1, 2, 3, 4, 5]])
+
+    vlm_runner.processor = _FakeVLMProcessor()
+    vlm_runner.model = _FakeVLMModel()
+    assert vlm_runner.generate(img, "OCR:", max_new_tokens=128) == "Decoded VLM Text"
+    assert vlm_generate_kwargs["use_cache"] is True
+    assert vlm_generate_kwargs["max_new_tokens"] == 128
+    assert vlm_generate_kwargs["do_sample"] is False
+
+
+def test_otsl_table_conversion_and_vl_integration() -> None:
+    otsl = (
+        "<fcel>Title\nSub<lcel><fcel>A & B<nl>"
+        "<ucel><xcel><fcel>Value<nl>"
+        "<fcel>Row2<ecel><fcel>99<nl>"
+    )
+    html = otsl_to_html(otsl)
+    assert html == (
+        "<table>"
+        '<tr><td colspan="2" rowspan="2">Title Sub</td><td>A &amp; B</td></tr>'
+        "<tr><td>Value</td></tr>"
+        "<tr><td>Row2</td><td></td><td>99</td></tr>"
+        "</table>"
+    )
+
+    class _FakeOTSLVLM:
+        def generate(
+            self,
+            image: Image.Image,
+            prompt: str = "OCR:",
+            *,
+            max_new_tokens: int = 1024,
+        ) -> str:
+            return "<fcel>Col1<fcel>Col2<nl><fcel>X<fcel>Y<nl>"
+
+        def generate_batch(
+            self,
+            requests: Sequence[tuple[Image.Image, str]],
+            *,
+            max_new_tokens: int = 1024,
+        ) -> list[str]:
+            return [
+                self.generate(img, prompt, max_new_tokens=max_new_tokens)
+                for img, prompt in requests
+            ]
+
+    vl = PaddleOCRVL(device="cpu")
+    vl._layout_runner = _FakeLayoutRunner(  # type: ignore[assignment]
+        [DetectedLayoutItem(label="table", box=(0.0, 0.0, 100.0, 100.0), score=0.95, order_index=0)]
+    )
+    vl._local_vlm_runner = _FakeOTSLVLM()  # type: ignore[assignment]
+
+    res = vl.predict(Image.new("RGB", (100, 100), color="white"))[0]
+    assert (
+        res.blocks[0].html
+        == "<table><tr><td>Col1</td><td>Col2</td></tr><tr><td>X</td><td>Y</td></tr></table>"
+    )
+    assert "| Col1 | Col2 |" in res.markdown
+    assert "| X | Y |" in res.markdown
