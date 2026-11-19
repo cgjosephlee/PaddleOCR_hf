@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from PIL import Image, ImageDraw
 
@@ -30,7 +31,10 @@ def _resolve_output_file(
         return target
 
     target.mkdir(parents=True, exist_ok=True)
-    stem = Path(input_path).stem if input_path else default_prefix
+    if input_path and input_path.startswith(("http://", "https://")):
+        stem = Path(urlparse(input_path).path).stem or default_prefix
+    else:
+        stem = Path(input_path).stem if input_path else default_prefix
     if page_index is not None:
         stem = f"{stem}_page{page_index}"
     return target / f"{stem}{suffix}"
@@ -250,6 +254,14 @@ class OCRResult:
         canvas.save(out_file)
         return out_file
 
+    def save_all(self, save_path: str | Path) -> dict[str, Path]:
+        """Save JSON, Markdown, and annotated image outputs into ``save_path``."""
+        return {
+            "json": self.save_to_json(save_path),
+            "markdown": self.save_to_markdown(save_path),
+            "img": self.save_to_img(save_path),
+        }
+
 
 @dataclass(slots=True)
 class StructureResult:
@@ -341,6 +353,14 @@ class StructureResult:
         canvas.save(out_file)
         return out_file
 
+    def save_all(self, save_path: str | Path) -> dict[str, Path]:
+        """Save JSON, Markdown, and annotated image outputs into ``save_path``."""
+        return {
+            "json": self.save_to_json(save_path),
+            "markdown": self.save_to_markdown(save_path),
+            "img": self.save_to_img(save_path),
+        }
+
 
 @dataclass(slots=True)
 class VLResult:
@@ -422,6 +442,14 @@ class VLResult:
             draw.text((block.box[0], max(0.0, block.box[1] - 14.0)), block.label, fill=(0, 80, 200))
         canvas.save(out_file)
         return out_file
+
+    def save_all(self, save_path: str | Path) -> dict[str, Path]:
+        """Save JSON, Markdown, and annotated image outputs into ``save_path``."""
+        return {
+            "json": self.save_to_json(save_path),
+            "markdown": self.save_to_markdown(save_path),
+            "img": self.save_to_img(save_path),
+        }
 
 
 class _SimpleHTMLTableParser(HTMLParser):

@@ -85,6 +85,7 @@ class PaddleOCRVL:
         vl_rec_timeout: float = 60.0,
         max_new_tokens: int = 1024,
         pdf_dpi: int = 200,
+        pdf_password: str | None = None,
         device: DeviceLike = None,
         dtype: DTypeLike = None,
         attn_implementation: str | None = None,
@@ -122,6 +123,7 @@ class PaddleOCRVL:
         self.vl_rec_timeout = vl_rec_timeout
         self.max_new_tokens = max_new_tokens
         self.pdf_dpi = pdf_dpi
+        self.pdf_password = pdf_password
 
         self._doc_ori_runner: ImageClassifierRunner | None = None
         self._unwarp_runner: DocumentUnwarpingRunner | None = None
@@ -205,6 +207,7 @@ class PaddleOCRVL:
         layout_threshold: float | None = None,
         prompt: str = "OCR:",
         max_new_tokens: int | None = None,
+        pdf_password: str | None = None,
     ) -> list[VLResult]:
         """Run document parsing using ``PaddleOCR-VL-1.6`` (local PyTorch or external API)."""
         do_doc_ori = (
@@ -218,8 +221,9 @@ class PaddleOCRVL:
         )
         thresh = self.layout_threshold if layout_threshold is None else layout_threshold
         tokens_limit = self.max_new_tokens if max_new_tokens is None else max_new_tokens
+        effective_password = self.pdf_password if pdf_password is None else pdf_password
 
-        pages = load_inputs(input, pdf_dpi=self.pdf_dpi)
+        pages = load_inputs(input, pdf_dpi=self.pdf_dpi, pdf_password=effective_password)
         vlm = self._get_vlm_recognizer()
         results: list[VLResult] = []
 
@@ -320,6 +324,7 @@ class PaddleOCRVL:
         layout_threshold: float | None = None,
         prompt: str = "OCR:",
         max_new_tokens: int | None = None,
+        pdf_password: str | None = None,
     ) -> list[VLResult]:
         return self.predict(
             input,
@@ -330,4 +335,5 @@ class PaddleOCRVL:
             layout_threshold=layout_threshold,
             prompt=prompt,
             max_new_tokens=max_new_tokens,
+            pdf_password=pdf_password,
         )

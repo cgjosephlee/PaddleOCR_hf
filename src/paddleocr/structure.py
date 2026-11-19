@@ -114,6 +114,7 @@ class PPStructureV3:
         use_chart_recognition: bool = False,
         layout_threshold: float = 0.4,
         pdf_dpi: int = 200,
+        pdf_password: str | None = None,
         device: DeviceLike = None,
         dtype: DTypeLike = None,
         trust_remote_code: bool = False,
@@ -172,6 +173,7 @@ class PPStructureV3:
         self.use_chart_recognition = use_chart_recognition
         self.layout_threshold = layout_threshold
         self.pdf_dpi = pdf_dpi
+        self.pdf_password = pdf_password
 
         self.ocr = PaddleOCR(
             text_detection_model_name=resolve_model_id(
@@ -190,6 +192,7 @@ class PPStructureV3:
             use_doc_unwarping=False,
             use_textline_orientation=use_textline_orientation,
             pdf_dpi=pdf_dpi,
+            pdf_password=pdf_password,
             device=self.device,
             dtype=self.vision_dtype,
             trust_remote_code=trust_remote_code,
@@ -402,6 +405,7 @@ class PPStructureV3:
         use_seal_recognition: bool | None = None,
         use_chart_recognition: bool | None = None,
         layout_threshold: float | None = None,
+        pdf_password: str | None = None,
     ) -> list[StructureResult]:
         """Run the modular ``PPStructureV3`` document analysis pipeline on images or PDFs."""
         do_doc_ori = (
@@ -433,8 +437,9 @@ class PPStructureV3:
             self.use_chart_recognition if use_chart_recognition is None else use_chart_recognition
         )
         thresh = self.layout_threshold if layout_threshold is None else layout_threshold
+        effective_password = self.pdf_password if pdf_password is None else pdf_password
 
-        pages = load_inputs(input, pdf_dpi=self.pdf_dpi)
+        pages = load_inputs(input, pdf_dpi=self.pdf_dpi, pdf_password=effective_password)
         results: list[StructureResult] = []
 
         for page in pages:
@@ -561,6 +566,7 @@ class PPStructureV3:
         use_seal_recognition: bool | None = None,
         use_chart_recognition: bool | None = None,
         layout_threshold: float | None = None,
+        pdf_password: str | None = None,
     ) -> list[StructureResult]:
         return self.predict(
             input,
@@ -573,4 +579,5 @@ class PPStructureV3:
             use_seal_recognition=use_seal_recognition,
             use_chart_recognition=use_chart_recognition,
             layout_threshold=layout_threshold,
+            pdf_password=pdf_password,
         )

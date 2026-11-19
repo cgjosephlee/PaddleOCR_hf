@@ -12,6 +12,7 @@ from typing import Any, cast
 import httpx
 import numpy as np
 import pypdfium2 as pdfium  # pyright: ignore[reportMissingTypeStubs]
+import pypdfium2.raw as pdfium_c  # pyright: ignore[reportMissingTypeStubs]
 from numpy.typing import NDArray
 from PIL import Image
 
@@ -20,6 +21,9 @@ type ImageInput = SingleInput | Sequence[SingleInput]
 type BBox = tuple[float, float, float, float]
 type Point = tuple[float, float]
 type Polygon = list[Point]
+
+SUPPORTED_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"})
+SUPPORTED_INPUT_SUFFIXES = SUPPORTED_IMAGE_SUFFIXES | {".pdf"}
 
 
 @dataclass(slots=True)
@@ -31,9 +35,28 @@ class PageImage:
     page_index: int | None = None
 
 
-def _render_pdf_bytes(data: bytes, source_path: str | None, dpi: int) -> list[PageImage]:
+def _render_pdf_bytes(
+    data: bytes,
+    source_path: str | None,
+    dpi: int,
+    *,
+    pdf_password: str | None = None,
+) -> list[PageImage]:
     scale = dpi / 72.0
-    doc: Any = pdfium.PdfDocument(data)
+    try:
+        doc: Any = pdfium.PdfDocument(data, password=pdf_password)
+    except pdfium.PdfiumError as exc:
+        if getattr(exc, "err_code", None) == pdfium_c.FPDF_ERR_PASSWORD:
+            label = source_path or "<bytes>"
+            if pdf_password:
+                msg = f"Invalid PDF password for: {label}."
+            else:
+                msg = (
+                    f"PDF is password-protected: {label}. "
+                    "Provide `pdf_password` (or `--pdf_password` in CLI)."
+                )
+            raise ValueError(msg) from exc
+        raise
     pages: list[PageImage] = []
     try:
         num_pages = len(doc)
@@ -50,7 +73,12 @@ def _render_pdf_bytes(data: bytes, source_path: str | None, dpi: int) -> list[Pa
     return pages
 
 
-def _load_single_input(item: SingleInput, *, pdf_dpi: int = 200) -> list[PageImage]:
+def _load_single_input(
+    item: SingleInput,
+    *,
+    pdf_dpi: int = 200,
+    pdf_password: str | None = None,
+) -> list[PageImage]:
     if isinstance(item, Image.Image):
         return [PageImage(image=item.convert("RGB"))]
 
@@ -73,7 +101,7 @@ def _load_single_input(item: SingleInput, *, pdf_dpi: int = 200) -> list[PageIma
         response.raise_for_status()
         content = response.content
         if raw_path.lower().endswith(".pdf") or content.startswith(b"%PDF"):
-            return _render_pdf_bytes(content, raw_path, pdf_dpi)
+            return _render_pdf_bytes(content, raw_path, pdf_dpi, pdf_password=pdf_password)
         img = Image.open(BytesIO(content)).convert("RGB")
         return [PageImage(image=img, source_path=raw_path)]
 
@@ -82,21 +110,40 @@ def _load_single_input(item: SingleInput, *, pdf_dpi: int = 200) -> list[PageIma
         msg = f"Input file not found: {path}"
         raise FileNotFoundError(msg)
 
+    if path.is_dir():
+        children = [
+            child
+            for child in sorted(path.iterdir())
+            if child.is_file() and child.suffix.lower() in SUPPORTED_INPUT_SUFFIXES
+        ]
+        if not children:
+            msg = f"No supported image or PDF files found in directory: {path}"
+            raise FileNotFoundError(msg)
+        pages: list[PageImage] = []
+        for child in children:
+            pages.extend(_load_single_input(child, pdf_dpi=pdf_dpi, pdf_password=pdf_password))
+        return pages
+
     if path.suffix.lower() == ".pdf":
-        return _render_pdf_bytes(path.read_bytes(), str(path), pdf_dpi)
+        return _render_pdf_bytes(path.read_bytes(), str(path), pdf_dpi, pdf_password=pdf_password)
 
     img = Image.open(path).convert("RGB")
     return [PageImage(image=img, source_path=str(path))]
 
 
-def load_inputs(inputs: ImageInput, *, pdf_dpi: int = 200) -> list[PageImage]:
-    """Normalize single or batched image/PDF/URL inputs into a flat list of ``PageImage`` objects."""
+def load_inputs(
+    inputs: ImageInput,
+    *,
+    pdf_dpi: int = 200,
+    pdf_password: str | None = None,
+) -> list[PageImage]:
+    """Normalize single or batched image/PDF/URL/directory inputs into ``PageImage`` objects."""
     if isinstance(inputs, (str, Path, Image.Image, np.ndarray)):
-        return _load_single_input(inputs, pdf_dpi=pdf_dpi)
+        return _load_single_input(inputs, pdf_dpi=pdf_dpi, pdf_password=pdf_password)
 
     pages: list[PageImage] = []
     for item in inputs:
-        pages.extend(_load_single_input(item, pdf_dpi=pdf_dpi))
+        pages.extend(_load_single_input(item, pdf_dpi=pdf_dpi, pdf_password=pdf_password))
     return pages
 
 

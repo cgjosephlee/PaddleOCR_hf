@@ -61,6 +61,7 @@ class PaddleOCR:
         text_rec_score_thresh: float = 0.0,
         text_recognition_batch_size: int = 8,
         pdf_dpi: int = 200,
+        pdf_password: str | None = None,
         device: DeviceLike = None,
         dtype: DTypeLike = None,
         trust_remote_code: bool = False,
@@ -95,6 +96,7 @@ class PaddleOCR:
         self.text_rec_score_thresh = text_rec_score_thresh
         self.text_recognition_batch_size = text_recognition_batch_size
         self.pdf_dpi = pdf_dpi
+        self.pdf_password = pdf_password
 
         self._doc_ori_runner: ImageClassifierRunner | None = None
         self._unwarp_runner: DocumentUnwarpingRunner | None = None
@@ -277,16 +279,18 @@ class PaddleOCR:
         text_det_box_thresh: float | None = None,
         text_det_unclip_ratio: float | None = None,
         text_rec_score_thresh: float | None = None,
+        pdf_password: str | None = None,
     ) -> list[OCRResult]:
-        """Run the full OCR pipeline on one or more images, URLs, or PDF documents."""
+        """Run the full OCR pipeline on one or more images, URLs, directories, or PDF documents."""
         do_doc_ori = (
             self.use_doc_orientation_classify
             if use_doc_orientation_classify is None
             else use_doc_orientation_classify
         )
         do_unwarp = self.use_doc_unwarping if use_doc_unwarping is None else use_doc_unwarping
+        effective_password = self.pdf_password if pdf_password is None else pdf_password
 
-        pages = load_inputs(input, pdf_dpi=self.pdf_dpi)
+        pages = load_inputs(input, pdf_dpi=self.pdf_dpi, pdf_password=effective_password)
         results: list[OCRResult] = []
         for page in pages:
             working_img = page.image
@@ -331,6 +335,7 @@ class PaddleOCR:
         text_det_box_thresh: float | None = None,
         text_det_unclip_ratio: float | None = None,
         text_rec_score_thresh: float | None = None,
+        pdf_password: str | None = None,
     ) -> list[OCRResult]:
         return self.predict(
             input,
@@ -341,4 +346,5 @@ class PaddleOCR:
             text_det_box_thresh=text_det_box_thresh,
             text_det_unclip_ratio=text_det_unclip_ratio,
             text_rec_score_thresh=text_rec_score_thresh,
+            pdf_password=pdf_password,
         )
